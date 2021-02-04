@@ -439,7 +439,6 @@ static struct refs_override_action_t : public action_handler_t {
       op_idx = (op_idx == -1) ? 0 : op_idx;
 
       insn_t old_insn;
-      
       decode_insn(&old_insn, ea);
 
       ea_t old_addr = get_operand_ref(old_insn.ops[op_idx]);
@@ -479,7 +478,7 @@ static struct refs_override_menu_action_t : public action_handler_t {
   }
 
   action_state_t idaapi update(action_update_ctx_t* ctx) override {
-    return AST_ENABLE_ALWAYS;
+    return AST_ENABLE_FOR_IDB;
   }
 
 } refs_overrider_menu;
@@ -500,30 +499,13 @@ static const action_desc_t refs_override_action = ACTION_DESC_LITERAL(
   NULL, -1
 );
 
-static plugmod_t * idaapi init(void) {
-  recursive = false;
+struct plugin_ctx_t : public plugmod_t
+{
+  virtual bool idaapi run(size_t arg) override { return false; };
+  virtual ~plugin_ctx_t();
+};
 
-  refs_w = nullptr;
-  oversList = nullptr;
-  toggleOverrideAction = nullptr;
-  delOverrideAction = nullptr;
-
-  overrides.clear();
-
-  register_action(refs_override_menu_action);
-  attach_action_to_menu(refs_override_menu_action_path, refs_override_menu_name, SETMENU_APP);
-
-  register_action(refs_override_action);
-
-  hook_to_notification_point(HT_UI, hook_ui, NULL);
-  register_post_event_visitor(HT_IDP, &ctx, NULL);
-
-  plugin_inited = true;
-
-  return PLUGIN_KEEP;
-}
-
-static void idaapi term(void) {
+plugin_ctx_t::~plugin_ctx_t() {
   if (plugin_inited) {
     TWidget* w = find_widget(refs_override_widget_name);
 
@@ -546,8 +528,27 @@ static void idaapi term(void) {
   plugin_inited = false;
 }
 
-static bool idaapi run(size_t arg) {
-  return false;
+static plugmod_t * idaapi init(void) {
+  recursive = false;
+
+  refs_w = nullptr;
+  oversList = nullptr;
+  toggleOverrideAction = nullptr;
+  delOverrideAction = nullptr;
+
+  overrides.clear();
+
+  register_action(refs_override_menu_action);
+  attach_action_to_menu(refs_override_menu_action_path, refs_override_menu_name, SETMENU_APP);
+
+  register_action(refs_override_action);
+
+  hook_to_notification_point(HT_UI, hook_ui, NULL);
+  register_post_event_visitor(HT_IDP, &ctx, NULL);
+
+  plugin_inited = true;
+
+  return new plugin_ctx_t;
 }
 
 
@@ -566,12 +567,12 @@ char help[] = "Refs Overrider by Vladimir Kononovich.\n"
 plugin_t PLUGIN =
 {
     IDP_INTERFACE_VERSION,
-    PLUGIN_PROC | PLUGIN_MOD, // plugin flags
+    PLUGIN_MULTI, // plugin flags
     init, // initialize
 
-    term, // terminate. this pointer may be NULL.
+    nullptr, // terminate. this pointer may be NULL.
 
-    run, // invoke plugin
+    nullptr, // invoke plugin
 
     comment, // long comment about the plugin
              // it could appear in the status line
