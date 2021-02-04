@@ -46,9 +46,7 @@ enum OverridesListColumns {
   OLC_EA,
   OLC_OpIndex,
   OLC_NewAddr,
-  OLC_DestLabel,
   OLC_OldAddr,
-  OLC_OldLabel,
   OLC_Last
 };
 
@@ -63,9 +61,7 @@ static const ListColumn_t columns[] = {
   { OLC_EA, "Address", "Where to override" },
   { OLC_OpIndex, "Operand", "Override operand #" },
   { OLC_NewAddr, "New Address", "Overridden address" },
-  { OLC_DestLabel, "New Address Name", "Label at the New Address" },
   { OLC_OldAddr, "Old Address", "What is overridden" },
-  { OLC_OldLabel, "Old Address Name", "Label at the Old Address" },
 };
 
 struct override_t {
@@ -89,7 +85,7 @@ static void add_override_item_to_list(const override_t over) {
     oversList->setItem(index, OverridesListColumns::OLC_Enabled, item);
 
     QString addrStr = QString::number(over.addr, 16);
-    item = new QTableWidgetItem(addrStr.toUpper());
+    item = new QTableWidgetItem(QString("0x%1").arg(addrStr.toUpper()));
     item->setTextAlignment(Qt::AlignCenter | Qt::AlignVCenter);
     oversList->setItem(index, OverridesListColumns::OLC_EA, item);
 
@@ -97,26 +93,31 @@ static void add_override_item_to_list(const override_t over) {
     item->setTextAlignment(Qt::AlignCenter | Qt::AlignVCenter);
     oversList->setItem(index, OverridesListColumns::OLC_OpIndex, item);
 
+    qstring name;
     addrStr = QString::number(over.new_addr, 16);
-    item = new QTableWidgetItem(addrStr.toUpper());
+    get_ea_name(&name, (ea_t)over.new_addr, GN_SHORT);
+
+    if (name.empty()) {
+      item = new QTableWidgetItem(QString("0x%1").arg(addrStr.toUpper()));
+    } else {
+      item = new QTableWidgetItem(QString("0x%1 (%2)").arg(addrStr.toUpper(), QString(name.c_str())));
+    }
+
     item->setTextAlignment(Qt::AlignCenter | Qt::AlignVCenter);
     oversList->setItem(index, OverridesListColumns::OLC_NewAddr, item);
 
-    qstring name;
-    get_ea_name(&name, (ea_t)over.new_addr, GN_SHORT);
-    item = new QTableWidgetItem(name.c_str());
-    item->setTextAlignment(Qt::AlignCenter | Qt::AlignVCenter);
-    oversList->setItem(index, OverridesListColumns::OLC_DestLabel, item);
-
     addrStr = QString::number(over.old_addr, 16);
-    item = new QTableWidgetItem(addrStr.toUpper());
+    get_ea_name(&name, (ea_t)over.old_addr, GN_SHORT);
+
+    if (name.empty()) {
+      item = new QTableWidgetItem(QString("0x%1").arg(addrStr.toUpper()));
+    }
+    else {
+      item = new QTableWidgetItem(QString("0x%1 (%2)").arg(addrStr.toUpper(), QString(name.c_str())));
+    }
+
     item->setTextAlignment(Qt::AlignCenter | Qt::AlignVCenter);
     oversList->setItem(index, OverridesListColumns::OLC_OldAddr, item);
-
-    get_ea_name(&name, (ea_t)over.old_addr, GN_SHORT);
-    item = new QTableWidgetItem(name.c_str());
-    item->setTextAlignment(Qt::AlignCenter | Qt::AlignVCenter);
-    oversList->setItem(index, OverridesListColumns::OLC_OldLabel, item);
 
     oversList->resizeColumnsToContents();
   }
@@ -170,7 +171,7 @@ static void load_overrides() {
   }
 }
 
-static void update_overs_gui_list() {
+static void update_overrides_gui_list() {
   int row = -1, col = -1;
 
   if (refs_w != nullptr && oversList != nullptr) {
@@ -191,7 +192,8 @@ static void update_overs_gui_list() {
 static void update_overrides_list(ea_t ea) {
   save_overrides();
   plan_ea(ea);
-  update_overs_gui_list();
+  auto_wait();
+  update_overrides_gui_list();
 }
 
 static void switch_override(ea_t ea, int op_idx) {
@@ -326,22 +328,20 @@ void OverridesListWindow::cellDoubleClicked(int row, int col) {
   ea_t cur_ea = BADADDR;
 
   switch (col) {
-  case OverridesListColumns::OLC_EA:
+  case OverridesListColumns::OLC_EA: {
+    cur_ea = oversList->item(row, col)->text().toULong(nullptr, 16);
+    op_idx = oversList->item(row, OverridesListColumns::OLC_OpIndex)->text().toULong(nullptr, 16);
+  } break;
   case OverridesListColumns::OLC_NewAddr:
   case OverridesListColumns::OLC_OldAddr: {
-    cur_ea = oversList->item(row, col)->text().toULong(nullptr, 16);
+    QString text = oversList->item(row, col)->text();
+    QStringList list = text.split(" ", QString::SkipEmptyParts);
 
-    switch (col) {
-    case OverridesListColumns::OLC_EA: {
-      op_idx = oversList->item(row, OverridesListColumns::OLC_OpIndex)->text().toULong(nullptr, 16);
-    } break;
+    if (list.size() == 0) {
+      return;
     }
-  } break;
-  case OverridesListColumns::OLC_DestLabel: {
-    cur_ea = oversList->item(row, OverridesListColumns::OLC_NewAddr)->text().toULong(nullptr, 16);
-  } break;
-  case OverridesListColumns::OLC_OldLabel: {
-    cur_ea = oversList->item(row, OverridesListColumns::OLC_OldAddr)->text().toULong(nullptr, 16);
+
+    cur_ea = list.at(0).toULong(nullptr, 16);
   } break;
   case OverridesListColumns::OLC_Enabled: {
     cur_ea = oversList->item(row, OverridesListColumns::OLC_EA)->text().toULong(nullptr, 16);
@@ -383,17 +383,13 @@ static ssize_t idaapi hook_ui(void* user_data, int notification_code, va_list va
         columns[OLC_EA].name,
         columns[OLC_OpIndex].name,
         columns[OLC_NewAddr].name,
-        columns[OLC_DestLabel].name,
         columns[OLC_OldAddr].name,
-        columns[OLC_OldLabel].name,
         });
       oversList->horizontalHeaderItem(OverridesListColumns::OLC_Enabled)->setToolTip(columns[OLC_Enabled].tooltip);
       oversList->horizontalHeaderItem(OverridesListColumns::OLC_EA)->setToolTip(columns[OLC_EA].tooltip);
       oversList->horizontalHeaderItem(OverridesListColumns::OLC_OpIndex)->setToolTip(columns[OLC_OpIndex].tooltip);
       oversList->horizontalHeaderItem(OverridesListColumns::OLC_NewAddr)->setToolTip(columns[OLC_NewAddr].tooltip);
-      oversList->horizontalHeaderItem(OverridesListColumns::OLC_DestLabel)->setToolTip(columns[OLC_DestLabel].tooltip);
       oversList->horizontalHeaderItem(OverridesListColumns::OLC_OldAddr)->setToolTip(columns[OLC_OldAddr].tooltip);
-      oversList->horizontalHeaderItem(OverridesListColumns::OLC_OldLabel)->setToolTip(columns[OLC_OldLabel].tooltip);
 
       OverridesListWindow* overridesWnd = new OverridesListWindow(w);
       toggleOverrideAction = new QAction("Toggle override", oversList);
@@ -477,7 +473,7 @@ static struct refs_override_menu_action_t : public action_handler_t {
     }
 
     load_overrides();
-    update_overs_gui_list();
+    update_overrides_gui_list();
 
     return 1;
   }
@@ -536,6 +532,7 @@ static void idaapi term(void) {
     }
 
     refs_w = nullptr; // make lint happy
+    overrides.clear();
 
     unhook_from_notification_point(HT_UI, hook_ui);
     unregister_post_event_visitor(HT_IDP, &ctx);
