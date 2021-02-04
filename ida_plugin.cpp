@@ -188,6 +188,12 @@ static void update_overs_gui_list() {
   }
 }
 
+static void update_overrides_list(ea_t ea) {
+  save_overrides();
+  plan_ea(ea);
+  update_overs_gui_list();
+}
+
 static void switch_override(ea_t ea, int op_idx) {
   for (auto i = overrides.begin(); i != overrides.end(); ++i) {
     if (i->first.first == ea && i->first.second == op_idx) {
@@ -195,8 +201,7 @@ static void switch_override(ea_t ea, int op_idx) {
     }
   }
 
-  save_overrides();
-  load_overrides();
+  update_overrides_list(ea);
 }
 
 static void add_override(ea_t ea, int op_idx, ea_t new_ea, ea_t old_ea) {
@@ -209,9 +214,8 @@ static void add_override(ea_t ea, int op_idx, ea_t new_ea, ea_t old_ea) {
   };
 
   overrides[std::pair<ea_t, int>(ea, op_idx)] = over;
-  add_override_item_to_list(over);
 
-  save_overrides();
+  update_overrides_list(ea);
 }
 
 static void del_override(ea_t ea, int op_idx) {
@@ -223,8 +227,7 @@ static void del_override(ea_t ea, int op_idx) {
     }
   }
 
-  save_overrides();
-  load_overrides();
+  update_overrides_list(ea);
 }
 
 static void set_operand_ref(op_t& op, ea_t new_addr) {
