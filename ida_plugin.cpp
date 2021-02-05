@@ -74,6 +74,10 @@ struct override_t {
 
 static std::map<std::pair<ea_t, int>, override_t> overrides;
 
+//struct overrides_list_t : public chooser_t {
+//  overrides_list_t(const char* title) : chooser_t(0, QCOUNT)
+//};
+
 static void add_override_item_to_list(const override_t over) {
   if (refs_w != nullptr && oversList != nullptr) {
     int index = oversList->rowCount();
@@ -427,9 +431,9 @@ ssize_t idaapi post_visitor_t::handle_post_event(ssize_t code, int notification_
 
 struct plugin_ctx_t : public plugmod_t, public event_listener_t {
 
-  post_visitor_t post_visitor = post_visitor_t(*this);
-  refs_override_action_t refs_overrider = refs_override_action_t(*this);
-  refs_override_menu_action_t refs_overrider_menu = refs_override_menu_action_t(*this);
+  post_visitor_t* post_visitor = new post_visitor_t(*this);
+  refs_override_action_t* refs_overrider = new refs_override_action_t(*this);
+  refs_override_menu_action_t* refs_overrider_menu = new refs_override_menu_action_t(*this);
 
   plugin_ctx_t() {
     recursive = false;
@@ -444,7 +448,7 @@ struct plugin_ctx_t : public plugmod_t, public event_listener_t {
     register_action(ACTION_DESC_LITERAL(
       refs_override_menu_name,
       refs_override_widget_name,
-      &refs_overrider_menu,
+      refs_overrider_menu,
       refs_override_widget_hotkey,
       NULL, -1
     ));
@@ -453,13 +457,13 @@ struct plugin_ctx_t : public plugmod_t, public event_listener_t {
     register_action(ACTION_DESC_LITERAL(
       refs_override_name,
       refs_override_action_name,
-      &refs_overrider,
+      refs_overrider,
       refs_override_action_hotkey,
       NULL, -1
     ));
 
     hook_event_listener(HT_UI, this);
-    register_post_event_visitor(HT_IDP, &post_visitor, this);
+    register_post_event_visitor(HT_IDP, post_visitor, this);
 
     plugin_inited = true;
   }
@@ -552,8 +556,12 @@ struct plugin_ctx_t : public plugmod_t, public event_listener_t {
 
       unregister_action(refs_override_name);
 
-      unregister_post_event_visitor(HT_IDP, &post_visitor);
+      unregister_post_event_visitor(HT_IDP, post_visitor);
       unhook_event_listener(HT_UI, this);
+
+      delete post_visitor;
+      delete refs_overrider;
+      delete refs_overrider_menu;
 
       recursive = false;
     }
