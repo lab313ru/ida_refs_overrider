@@ -249,40 +249,6 @@ static ea_t get_operand_ref(op_t& op) {
   return op.value;
 }
 
-struct refs_creation_visitor_t : public post_event_visitor_t {
-  ssize_t idaapi handle_post_event(ssize_t code, int notification_code, va_list va) override {
-    switch (notification_code) {
-    case processor_t::ev_ana_insn: {
-      insn_t* insn = va_arg(va, insn_t*);
-
-      if (recursive) {
-        return 0;
-      }
-
-      recursive = true;
-      decode_insn(insn, insn->ea);
-      recursive = false;
-
-      load_overrides();
-
-      for (auto i = 0; i < UA_MAXOP; ++i) {
-        override_t over = find_override(insn->ea, i);
-
-        if (!over.enabled) {
-          continue;
-        }
-
-        set_operand_ref(insn->ops[i], over.new_addr);
-      }
-
-      return insn->size;
-    } break;
-    }
-
-    return code;
-  }
-} ctx;
-
 void OverridesListWindow::switchOverride() {
   int cur_row = oversList->currentRow();
 
@@ -357,80 +323,12 @@ void OverridesListWindow::cellDoubleClicked(int row, int col) {
   jumpto(cur_ea, op_idx);
 }
 
+struct plugin_ctx_t;
+struct refs_override_action_t : public action_handler_t {
 
-static ssize_t idaapi hook_ui(void* user_data, int notification_code, va_list va) {
-  switch (notification_code) {
-  case ui_widget_visible: {
-    TWidget* widget = va_arg(va, TWidget*);
+  plugin_ctx_t& ctx;
+  refs_override_action_t(plugin_ctx_t& ctx_) : ctx(ctx_) {};
 
-    if (widget == refs_w) {
-      QWidget* w = (QWidget*)widget;
-
-      QFont font = QFont("Lucida Console", 10);
-
-      QGridLayout* mainLayout = new QGridLayout(w);
-
-      oversList = new ClickableTable(w);
-      oversList->setEditTriggers(QAbstractItemView::NoEditTriggers);
-      oversList->setFocusPolicy(Qt::NoFocus);
-      oversList->setShowGrid(true);
-      oversList->setColumnCount(OverridesListColumns::OLC_Last);
-      oversList->setFont(font);
-      oversList->setSelectionBehavior(QAbstractItemView::SelectionBehavior::SelectItems);
-      oversList->setSelectionMode(QAbstractItemView::SingleSelection);
-      oversList->setHorizontalHeaderLabels({
-        columns[OLC_Enabled].name,
-        columns[OLC_EA].name,
-        columns[OLC_OpIndex].name,
-        columns[OLC_NewAddr].name,
-        columns[OLC_OldAddr].name,
-        });
-      oversList->horizontalHeaderItem(OverridesListColumns::OLC_Enabled)->setToolTip(columns[OLC_Enabled].tooltip);
-      oversList->horizontalHeaderItem(OverridesListColumns::OLC_EA)->setToolTip(columns[OLC_EA].tooltip);
-      oversList->horizontalHeaderItem(OverridesListColumns::OLC_OpIndex)->setToolTip(columns[OLC_OpIndex].tooltip);
-      oversList->horizontalHeaderItem(OverridesListColumns::OLC_NewAddr)->setToolTip(columns[OLC_NewAddr].tooltip);
-      oversList->horizontalHeaderItem(OverridesListColumns::OLC_OldAddr)->setToolTip(columns[OLC_OldAddr].tooltip);
-
-      OverridesListWindow* overridesWnd = new OverridesListWindow(w);
-      toggleOverrideAction = new QAction("Toggle override", oversList);
-      toggleOverrideAction->setShortcut(QKeySequence(Qt::Key_X));
-      toggleOverrideAction->setEnabled(false);
-
-      delOverrideAction = new QAction("Delete override", oversList);
-      delOverrideAction->setShortcut(QKeySequence::Delete);
-      delOverrideAction->setEnabled(false);
-
-      oversList->setContextMenuPolicy(Qt::ActionsContextMenu);
-
-      mainLayout->addWidget(oversList);
-
-      w->setLayout(mainLayout);
-
-      QObject::connect(toggleOverrideAction, SIGNAL(triggered()), overridesWnd, SLOT(switchOverride()));
-      oversList->addAction(toggleOverrideAction);
-
-      QObject::connect(delOverrideAction, SIGNAL(triggered()), overridesWnd, SLOT(removeOverride()));
-      oversList->addAction(delOverrideAction);
-
-      QObject::connect(oversList, SIGNAL(cellDoubleClicked(int,int)), overridesWnd, SLOT(cellDoubleClicked(int,int)));
-    }
-  } break;
-  case ui_widget_invisible: {
-    TWidget* widget = va_arg(va, TWidget*);
-
-    if (widget == refs_w) {
-      refs_w = nullptr;
-      oversList = nullptr;
-      toggleOverrideAction = nullptr;
-      delOverrideAction = nullptr;
-    }
-  } break;
-  }
-
-  return 0;
-}
-
-static struct refs_override_action_t : public action_handler_t {
   int idaapi activate(action_activation_ctx_t* ctx) override {
     ea_t ea = get_screen_ea();
 
@@ -456,12 +354,16 @@ static struct refs_override_action_t : public action_handler_t {
   }
 
   action_state_t idaapi update(action_update_ctx_t* ctx) override {
-    return AST_ENABLE_FOR_IDB;
+    return AST_ENABLE_ALWAYS;
   }
 
-} refs_overrider;
+};
 
-static struct refs_override_menu_action_t : public action_handler_t {
+struct refs_override_menu_action_t : public action_handler_t {
+
+  plugin_ctx_t& ctx;
+  refs_override_menu_action_t(plugin_ctx_t& ctx_) : ctx(ctx_) {};
+
   int idaapi activate(action_activation_ctx_t* ctx) override {
     TWidget* w = find_widget(refs_override_widget_name);
     if (w == nullptr) {
@@ -478,76 +380,189 @@ static struct refs_override_menu_action_t : public action_handler_t {
   }
 
   action_state_t idaapi update(action_update_ctx_t* ctx) override {
-    return AST_ENABLE_FOR_IDB;
+    return AST_ENABLE_ALWAYS;
   }
 
-} refs_overrider_menu;
-
-
-static const action_desc_t refs_override_menu_action = ACTION_DESC_LITERAL(
-  refs_override_menu_name,
-  refs_override_widget_name,
-  &refs_overrider_menu,
-  refs_override_widget_hotkey,
-  NULL, -1
-);
-static const action_desc_t refs_override_action = ACTION_DESC_LITERAL(
-  refs_override_name,
-  refs_override_action_name,
-  &refs_overrider,
-  refs_override_action_hotkey,
-  NULL, -1
-);
-
-struct plugin_ctx_t : public plugmod_t
-{
-  virtual bool idaapi run(size_t arg) override { return false; };
-  virtual ~plugin_ctx_t();
 };
 
-plugin_ctx_t::~plugin_ctx_t() {
-  if (plugin_inited) {
-    TWidget* w = find_widget(refs_override_widget_name);
+struct post_visitor_t : public post_event_visitor_t {
 
-    if (w != nullptr) {
-      close_widget(w, WCLS_SAVE);
+  plugin_ctx_t &ctx;
+  post_visitor_t(plugin_ctx_t &ctx_) : ctx(ctx_) {};
+
+  ssize_t idaapi handle_post_event(ssize_t code, int notification_code, va_list va) override;
+};
+
+ssize_t idaapi post_visitor_t::handle_post_event(ssize_t code, int notification_code, va_list va) {
+  switch (notification_code) {
+  case processor_t::ev_ana_insn: {
+    insn_t* insn = va_arg(va, insn_t*);
+
+    if (recursive) {
+      return 0;
     }
 
-    refs_w = nullptr; // make lint happy
-    overrides.clear();
-
-    unhook_from_notification_point(HT_UI, hook_ui);
-    unregister_post_event_visitor(HT_IDP, &ctx);
-
-    unregister_action(refs_override_name);
-    unregister_action(refs_override_menu_name);
-
+    recursive = true;
+    decode_insn(insn, insn->ea);
     recursive = false;
+
+    load_overrides();
+
+    for (auto i = 0; i < UA_MAXOP; ++i) {
+      override_t over = find_override(insn->ea, i);
+
+      if (!over.enabled) {
+        continue;
+      }
+
+      set_operand_ref(insn->ops[i], over.new_addr);
+    }
+
+    return insn->size;
+  } break;
   }
 
-  plugin_inited = false;
+  return code;
 }
 
+struct plugin_ctx_t : public plugmod_t, public event_listener_t {
+
+  post_visitor_t post_visitor = post_visitor_t(*this);
+  refs_override_action_t refs_overrider = refs_override_action_t(*this);
+  refs_override_menu_action_t refs_overrider_menu = refs_override_menu_action_t(*this);
+
+  plugin_ctx_t() {
+    recursive = false;
+
+    refs_w = nullptr;
+    oversList = nullptr;
+    toggleOverrideAction = nullptr;
+    delOverrideAction = nullptr;
+
+    overrides.clear();
+
+    register_action(ACTION_DESC_LITERAL(
+      refs_override_menu_name,
+      refs_override_widget_name,
+      &refs_overrider_menu,
+      refs_override_widget_hotkey,
+      NULL, -1
+    ));
+    attach_action_to_menu(refs_override_menu_action_path, refs_override_menu_name, SETMENU_APP);
+
+    register_action(ACTION_DESC_LITERAL(
+      refs_override_name,
+      refs_override_action_name,
+      &refs_overrider,
+      refs_override_action_hotkey,
+      NULL, -1
+    ));
+
+    hook_event_listener(HT_UI, this);
+    register_post_event_visitor(HT_IDP, &post_visitor, this);
+
+    plugin_inited = true;
+  }
+
+  virtual bool idaapi run(size_t arg) override { return false; };
+
+  ssize_t idaapi on_event(ssize_t code, va_list va) override {
+    switch (code) {
+    case ui_widget_visible: {
+      TWidget* widget = va_arg(va, TWidget*);
+
+      if (widget == refs_w) {
+        QWidget* w = (QWidget*)widget;
+
+        QFont font = QFont("Lucida Console", 10);
+
+        QGridLayout* mainLayout = new QGridLayout(w);
+
+        oversList = new ClickableTable(w);
+        oversList->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        oversList->setFocusPolicy(Qt::NoFocus);
+        oversList->setShowGrid(true);
+        oversList->setColumnCount(OverridesListColumns::OLC_Last);
+        oversList->setFont(font);
+        oversList->setSelectionBehavior(QAbstractItemView::SelectionBehavior::SelectItems);
+        oversList->setSelectionMode(QAbstractItemView::SingleSelection);
+        oversList->setHorizontalHeaderLabels({
+          columns[OLC_Enabled].name,
+          columns[OLC_EA].name,
+          columns[OLC_OpIndex].name,
+          columns[OLC_NewAddr].name,
+          columns[OLC_OldAddr].name,
+          });
+        oversList->horizontalHeaderItem(OverridesListColumns::OLC_Enabled)->setToolTip(columns[OLC_Enabled].tooltip);
+        oversList->horizontalHeaderItem(OverridesListColumns::OLC_EA)->setToolTip(columns[OLC_EA].tooltip);
+        oversList->horizontalHeaderItem(OverridesListColumns::OLC_OpIndex)->setToolTip(columns[OLC_OpIndex].tooltip);
+        oversList->horizontalHeaderItem(OverridesListColumns::OLC_NewAddr)->setToolTip(columns[OLC_NewAddr].tooltip);
+        oversList->horizontalHeaderItem(OverridesListColumns::OLC_OldAddr)->setToolTip(columns[OLC_OldAddr].tooltip);
+
+        OverridesListWindow* overridesWnd = new OverridesListWindow(w);
+        toggleOverrideAction = new QAction("Toggle override", oversList);
+        toggleOverrideAction->setShortcut(QKeySequence(Qt::Key_X));
+        toggleOverrideAction->setEnabled(false);
+
+        delOverrideAction = new QAction("Delete override", oversList);
+        delOverrideAction->setShortcut(QKeySequence::Delete);
+        delOverrideAction->setEnabled(false);
+
+        oversList->setContextMenuPolicy(Qt::ActionsContextMenu);
+
+        mainLayout->addWidget(oversList);
+
+        w->setLayout(mainLayout);
+
+        QObject::connect(toggleOverrideAction, SIGNAL(triggered()), overridesWnd, SLOT(switchOverride()));
+        oversList->addAction(toggleOverrideAction);
+
+        QObject::connect(delOverrideAction, SIGNAL(triggered()), overridesWnd, SLOT(removeOverride()));
+        oversList->addAction(delOverrideAction);
+
+        QObject::connect(oversList, SIGNAL(cellDoubleClicked(int, int)), overridesWnd, SLOT(cellDoubleClicked(int, int)));
+      }
+    } break;
+    case ui_widget_invisible: {
+      TWidget* widget = va_arg(va, TWidget*);
+
+      if (widget == refs_w) {
+        refs_w = nullptr;
+        oversList = nullptr;
+        toggleOverrideAction = nullptr;
+        delOverrideAction = nullptr;
+      }
+    } break;
+    }
+
+    return 0;
+  }
+
+  ~plugin_ctx_t() {
+    if (plugin_inited) {
+      if (refs_w != nullptr) {
+        close_widget(refs_w, WCLS_SAVE);
+      }
+
+      refs_w = nullptr; // make lint happy
+      overrides.clear();
+
+      detach_action_from_menu(refs_override_menu_action_path, refs_override_menu_name);
+      unregister_action(refs_override_menu_name);
+
+      unregister_action(refs_override_name);
+
+      unregister_post_event_visitor(HT_IDP, &post_visitor);
+      unhook_event_listener(HT_UI, this);
+
+      recursive = false;
+    }
+
+    plugin_inited = false;
+  }
+};
+
 static plugmod_t * idaapi init(void) {
-  recursive = false;
-
-  refs_w = nullptr;
-  oversList = nullptr;
-  toggleOverrideAction = nullptr;
-  delOverrideAction = nullptr;
-
-  overrides.clear();
-
-  register_action(refs_override_menu_action);
-  attach_action_to_menu(refs_override_menu_action_path, refs_override_menu_name, SETMENU_APP);
-
-  register_action(refs_override_action);
-
-  hook_to_notification_point(HT_UI, hook_ui, NULL);
-  register_post_event_visitor(HT_IDP, &ctx, NULL);
-
-  plugin_inited = true;
-
   return new plugin_ctx_t;
 }
 
@@ -567,7 +582,7 @@ char help[] = "Refs Overrider by Vladimir Kononovich.\n"
 plugin_t PLUGIN =
 {
     IDP_INTERFACE_VERSION,
-    PLUGIN_MULTI, // plugin flags
+    PLUGIN_HIDE | PLUGIN_MULTI, // plugin flags
     init, // initialize
 
     nullptr, // terminate. this pointer may be NULL.
