@@ -61,7 +61,7 @@ struct override_t {
 };
 
 static void set_operand_ref(op_t& op, ea_t new_addr) {
-  if (op.type == o_near || op.type == o_far) {
+  if (op.type == o_near || op.type == o_far || op.type == o_mem) {
     op.addr = new_addr;
   }
   else {
@@ -70,7 +70,7 @@ static void set_operand_ref(op_t& op, ea_t new_addr) {
 }
 
 static ea_t get_operand_ref(op_t& op) {
-  if (op.type == o_near || op.type == o_far) {
+  if (op.type == o_near || op.type == o_far || op.type == o_mem) {
     return op.addr;
   }
 
@@ -188,6 +188,8 @@ public:
         if (is_mapped(new_addr)) {
           add_override(ea, op_idx, new_addr, old_addr);
           plan_ea(ea);
+        } else {
+          warning("Incorrect address (is not mapped)!");
         }
       }
 
@@ -550,7 +552,7 @@ char help[] = "Refs Overrider by Vladimir Kononovich.\n"
 plugin_t PLUGIN =
 {
     IDP_INTERFACE_VERSION,
-    PLUGIN_PROC | PLUGIN_MULTI, // plugin flags
+    PLUGIN_MULTI, // plugin flags
     init, // initialize
 
     nullptr, // terminate. this pointer may be NULL.
