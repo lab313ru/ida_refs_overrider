@@ -1,6 +1,7 @@
 #include <ida.hpp>
 #include <idp.hpp>
 #include <loader.hpp>
+#include <diskio.hpp>
 #include <auto.hpp>
 #include <name.hpp>
 
@@ -8,28 +9,36 @@
 
 static bool plugin_inited;
 static bool recursive;
+static bool ida_move_del_ren;
+static ea_t last_over_addr;
 
-static const char refs_override_name[] = "OverridesList:change_dest";
-static const char refs_override_menu_name[] = "OverridesList:show_window";
-static const char refs_override_menu_action_path[] = "View/Open subviews/Function calls";
-static const char refs_override_node[] = "$ overrides_list";
-static const char refs_override_widget_name[] = "Overrides list";
-static const char refs_override_action_name[] = "Change Destination Address";
+static const char overrides_show_wnd_name[] = "OverridesList:show_window";
+static const char overrides_menu_action_path[] = "View/Open subviews/Function calls";
+static const char overrides_node[] = "$ overrides_list";
+static const char overrides_wnd_title[] = "Overrides List";
 
-static const char refs_override_widget_hotkey[] = "Shift+Alt+R";
-static const char refs_override_action_hotkey[] = "Shift+R";
+static const char overrides_show_wnd_hotkey[] = "Shift+Alt+R";
+static const char overrides_change_dest_hotkey[] = "Shift+R";
 
-enum RefsStorageAltType {
-  RSAT_Count = 0,
-  RSAT_Enabled,
-  RSAT_EA,
-  RSAT_OpIndex,
-  RSAT_NewAddr,
-  RSAT_OldAddr,
-  RSAT_Last
+static const char overlays_add_name[] = "OverlaysList:add_overlay";
+static const char overlays_show_wnd_name[] = "OverlaysList:show_window";
+static const char overlays_menu_action_path[] = "View/Open subviews/Function Calls";
+static const char overlays_node[] = "$ overlays_list";
+static const char overlays_wnd_title[] = "Overlays List";
+
+static const char overlays_show_wnd_hotkey[] = "Shift+O";
+
+enum class OverridesStorageAltType : int {
+  OSAT_Count = 0,
+  OSAT_Enabled,
+  OSAT_EA,
+  OSAT_OpIndex,
+  OSAT_NewAddr,
+  OSAT_OldAddr,
+  OSAT_Last
 };
 
-enum OverridesListColumns {
+enum class OverridesListColumns : int {
   OLC_Enabled = 0,
   OLC_EA,
   OLC_OpIndex,
@@ -38,18 +47,17 @@ enum OverridesListColumns {
   OLC_Last
 };
 
-struct ListColumn_t {
-  enum OverridesListColumns column;
+struct OverridesListColumn_t {
+  enum class OverridesListColumns column;
   const char* name;
-  const char* tooltip;
 };
 
-static const ListColumn_t list_columns[] = {
-  { OLC_Enabled, "Enabled", "Is override enabled" },
-  { OLC_EA, "Address", "Where to override" },
-  { OLC_OpIndex, "Operand", "Override operand #" },
-  { OLC_NewAddr, "New Address", "Overridden address" },
-  { OLC_OldAddr, "Old Address", "What is overridden" },
+static const OverridesListColumn_t overrides_list_columns[] = {
+  { OverridesListColumns::OLC_Enabled, "Enabled" },
+  { OverridesListColumns::OLC_EA, "Address" },
+  { OverridesListColumns::OLC_OpIndex, "Operand" },
+  { OverridesListColumns::OLC_NewAddr, "New Address" },
+  { OverridesListColumns::OLC_OldAddr, "Old Address" },
 };
 
 struct override_t {
@@ -58,6 +66,41 @@ struct override_t {
   int op_idx = -1;
   ea_t new_addr = BADADDR;
   ea_t old_addr = BADADDR;
+};
+
+enum class OverlaysStorageAltType : int {
+  OSAT_Count = 0,
+  OSAT_OverlayAddr,
+  OSAT_RealAddr,
+  OSAT_Path,
+  OSAT_Last
+};
+
+enum class OverlaysListColumns : int {
+  OLC_Name = 0,
+  OLC_OverlayAddr,
+  OLC_RealAddr,
+  OLC_Size,
+  OLC_Path,
+  OLC_Last
+};
+
+struct OverlaysListColumn_t {
+  enum class OverlaysListColumns column;
+  const char* name;
+};
+
+static const OverlaysListColumn_t overlays_list_columns[] = {
+  { OverlaysListColumns::OLC_Name, "Name" },
+  { OverlaysListColumns::OLC_OverlayAddr, "Overlay Address" },
+  { OverlaysListColumns::OLC_RealAddr, "Real Address" },
+  { OverlaysListColumns::OLC_Size, "Overlay Size" },
+  { OverlaysListColumns::OLC_Path, "File" },
+};
+
+struct overlay_t {
+  ea_t over_addr = BADADDR;
+  qstring* path = nullptr;
 };
 
 static void set_operand_ref(op_t& op, ea_t new_addr) {
@@ -94,7 +137,7 @@ protected:
 
 private:
 
-  const char* const EDIT_FORM_EDIT = "Edit Override\n"
+  const char* const EDIT_FORM = "Edit Override\n"
     "\n"
     "<~E~nabled:C>>\n"
     "<#Address of instruction#    ~A~ddress:$::40::>\n"
@@ -102,7 +145,7 @@ private:
     "<#New referenced address#  Ove~r~rider:$::40::>\n"
     ;
 
-  const char* const EDIT_FORM_ADD = "Add Override\n"
+  const char* const ADD_FORM = "Add Override\n"
     "\n"
     "<#Address of instruction#    ~A~ddress:$::40::>\n"
     "<#Operand index#    ~O~perand:D::10::>\n"
@@ -113,7 +156,7 @@ private:
   cbret_t ask_for_override(size_t n = -1, bool enabled = true, ea_t addr = BADADDR, int op_idx = 0, ea_t new_addr = BADADDR);
 
 public:
-  overrides_list_t(const char* title, plugin_ctx_t& ctx_) : ctx(ctx_), chooser_t(CH_KEEP | CH_NOIDB | CH_CAN_INS | CH_CAN_DEL | CH_CAN_EDIT | CH_CAN_REFRESH | CH_RESTORE, qnumber(list_columns), list_widths, list_headers, title) {};
+  overrides_list_t(const char* title, plugin_ctx_t& ctx_) : ctx(ctx_), chooser_t(CH_KEEP | CH_NOIDB | CH_CAN_INS | CH_CAN_DEL | CH_CAN_EDIT | CH_CAN_REFRESH | CH_RESTORE, qnumber(overrides_list_columns), list_widths, list_headers, title) {};
 
   cbret_t idaapi del(size_t n) newapi override;
   inline cbret_t idaapi enter(size_t n) newapi override;
@@ -128,48 +171,161 @@ public:
 
 };
 
-struct refs_override_menu_action_t : public action_handler_t {
+const int overrides_list_t::list_widths[] = {
+  CHCOL_PLAIN | sizeof(overrides_list_columns[(int)OverridesListColumns::OLC_Enabled].name),
+  CHCOL_EA | 8,
+  CHCOL_DEC | sizeof(overrides_list_columns[(int)OverridesListColumns::OLC_OpIndex].name),
+  CHCOL_EA | 50,
+  CHCOL_EA | 50,
+};
 
-  overrides_list_t* overrides_list;
-  refs_override_menu_action_t(overrides_list_t* overrides_list_) : overrides_list(overrides_list_) {};
+const char* const overrides_list_t::list_headers[] = {
+  overrides_list_columns[(int)OverridesListColumns::OLC_Enabled].name,
+  overrides_list_columns[(int)OverridesListColumns::OLC_EA].name,
+  overrides_list_columns[(int)OverridesListColumns::OLC_OpIndex].name,
+  overrides_list_columns[(int)OverridesListColumns::OLC_NewAddr].name,
+  overrides_list_columns[(int)OverridesListColumns::OLC_OldAddr].name,
+};
 
-  int idaapi activate(action_activation_ctx_t* ctx) override {
-    overrides_list->choose();
+struct overlays_list_t : public chooser_t {
+  plugin_ctx_t& ctx;
 
+protected:
+  static const int list_widths[];
+  static const char* const list_headers[];
+
+private:
+
+  const char* const EDIT_FORM = "Edit Overlay\n"
+    "\n"
+    "<~N~ame:q:64:::>\n"
+    "<#Real address of the loaded data#~R~eal address:$::40::>\n"
+    ;
+
+  const char* const ADD_FORM = "Add Overlay\n"
+    "\n"
+    "<~N~ame:q:64:::>\n"
+    "<#Address of the original memory segment#~O~verlayed address:$::40::>\n"
+    "<#Real address of the loaded data#     ~R~eal address:$::40::>\n"
+    ;
+
+  cbret_t ask_for_overlay(size_t n = -1, const qstring* name = nullptr, ea_t overlayed_addr = BADADDR, ea_t real_addr = BADADDR);
+
+public:
+  overlays_list_t(const char* title, plugin_ctx_t& ctx_) : ctx(ctx_), chooser_t(CH_KEEP | CH_NOIDB | CH_CAN_INS | CH_CAN_DEL | CH_CAN_EDIT | CH_CAN_REFRESH | CH_RESTORE, qnumber(overlays_list_columns), list_widths, list_headers, title) {};
+
+  cbret_t idaapi del(size_t n) newapi override;
+  inline cbret_t idaapi enter(size_t n) newapi override;
+  void idaapi closed() override;
+  size_t idaapi get_count() const override;
+  ea_t idaapi get_ea(size_t n) const override;
+  void idaapi get_row(qstrvec_t* cols_, int* icon_, chooser_item_attrs_t* attrs, size_t n) const override;
+  bool idaapi init() override;
+  cbret_t idaapi edit(size_t n) newapi override;
+  cbret_t idaapi refresh(ssize_t n) newapi override;
+  cbret_t idaapi ins(ssize_t n) newapi override;
+
+  static bool check_overlay_params(const qstring* name, ea_t overlayed_addr, ea_t real_addr);
+};
+
+const int overlays_list_t::list_widths[] = {
+  CHCOL_PLAIN | sizeof(overlays_list_columns[(int)OverlaysListColumns::OLC_Name].name),
+  CHCOL_EA | 10,
+  CHCOL_EA | 10,
+  CHCOL_DEC | 10,
+  CHCOL_PATH | 100,
+};
+
+const char* const overlays_list_t::list_headers[] = {
+  overlays_list_columns[(int)OverlaysListColumns::OLC_Name].name,
+  overlays_list_columns[(int)OverlaysListColumns::OLC_OverlayAddr].name,
+  overlays_list_columns[(int)OverlaysListColumns::OLC_RealAddr].name,
+  overlays_list_columns[(int)OverlaysListColumns::OLC_Size].name,
+  overlays_list_columns[(int)OverlaysListColumns::OLC_Path].name,
+};
+
+struct overlays_menu_action_t : public action_handler_t {
+  overlays_list_t* overlays_list;
+  overlays_menu_action_t(overlays_list_t* overlays_list_) : overlays_list(overlays_list_) {};
+
+  int idaapi activate(action_activation_ctx_t *ctx) override {
+    overlays_list->choose();
     return 1;
   }
 
   action_state_t idaapi update(action_update_ctx_t* ctx) override {
     return AST_ENABLE_ALWAYS;
   }
+};
 
+struct overrides_menu_action_t : public action_handler_t {
+
+  overrides_list_t* overrides_list;
+  overrides_menu_action_t(overrides_list_t* overrides_list_) : overrides_list(overrides_list_) {};
+
+  int idaapi activate(action_activation_ctx_t* ctx) override {
+    overrides_list->choose();
+    return 1;
+  }
+
+  action_state_t idaapi update(action_update_ctx_t* ctx) override {
+    return AST_ENABLE_ALWAYS;
+  }
+};
+
+struct idb_post_event_visitor_t : public post_event_visitor_t {
+  plugin_ctx_t& ctx;
+
+public:
+  idb_post_event_visitor_t(plugin_ctx_t& ctx_) : ctx(ctx_) {};
+
+  ssize_t idaapi handle_post_event(ssize_t code, int notification_code, va_list va) override;
 };
 
 struct plugin_ctx_t : public plugmod_t, post_event_visitor_t {
 
-  overrides_list_t overrides_list = overrides_list_t(refs_override_widget_name, *this);
-  refs_override_menu_action_t refs_overrider_menu = refs_override_menu_action_t(&overrides_list);
+  overrides_list_t overrides_list = overrides_list_t(overrides_wnd_title, *this);
+  overrides_menu_action_t overrides_menu = overrides_menu_action_t(&overrides_list);
+
+  overlays_list_t overlays_list = overlays_list_t(overlays_wnd_title, *this);
+  overlays_menu_action_t overlays_menu = overlays_menu_action_t(&overlays_list);
+
+  idb_post_event_visitor_t idb_visitor = idb_post_event_visitor_t(*this);
 
 private:
-  std::map<std::pair<ea_t, int>, std::pair<override_t*, int>> overrides;
-  netnode n;
+  std::map<std::pair<ea_t, int>, std::pair<override_t*, size_t>> overrides; // instr addr/operand, struct/index
+  std::map<ea_t, std::pair<overlay_t*, size_t>> overlays; // real addr, overlayed addr/index
+  netnode n_overrides, n_overlays;
 
 public:
   plugin_ctx_t() {
     recursive = false;
+    ida_move_del_ren = false;
+    last_over_addr = BADADDR;
 
-    overrides.clear();
+    free_overrides();
+    free_overlays();
 
     register_action(ACTION_DESC_LITERAL(
-      refs_override_menu_name,
-      refs_override_widget_name,
-      &refs_overrider_menu,
-      refs_override_widget_hotkey,
+      overrides_show_wnd_name,
+      overrides_wnd_title,
+      &overrides_menu,
+      overrides_show_wnd_hotkey,
       NULL, -1
     ));
-    attach_action_to_menu(refs_override_menu_action_path, refs_override_menu_name, SETMENU_APP);
+    attach_action_to_menu(overrides_menu_action_path, overrides_show_wnd_name, SETMENU_APP);
+
+    register_action(ACTION_DESC_LITERAL(
+      overlays_show_wnd_name,
+      overlays_wnd_title,
+      &overlays_menu,
+      overlays_show_wnd_hotkey,
+      NULL, -1
+    ));
+    attach_action_to_menu(overlays_menu_action_path, overlays_show_wnd_name, SETMENU_APP);
 
     register_post_event_visitor(HT_IDP, this, this);
+    register_post_event_visitor(HT_IDB, &idb_visitor, this);
 
     plugin_inited = true;
   }
@@ -199,32 +355,26 @@ public:
     return false;
   };
 
-   virtual ~plugin_ctx_t() {
-     if (plugin_inited) {
-       for (auto i = overrides.cbegin(); i != overrides.cend(); ++i) {
-         delete i->second.first;
-       }
+  virtual ~plugin_ctx_t() {
+    if (plugin_inited) {
+      free_overrides();
+      free_overlays();
 
-       //overrides.clear();
+      recursive = false;
+      ida_move_del_ren = false;
+      last_over_addr = BADADDR;
+    }
 
-       //detach_action_from_menu(refs_override_menu_action_path, refs_override_menu_name);
-       //unregister_action(refs_override_menu_name);
+    plugin_inited = false;
+  }
 
-       unregister_post_event_visitor(HT_IDP, this);
-
-       //delete refs_overrider_menu;
-
-       recursive = false;
-     }
-
-     plugin_inited = false;
-   }
-
-  size_t count() {
+  size_t overrides_count() {
     return overrides.size();
   }
 
+  void free_overrides();
   void save_overrides();
+  void load_overrides();
   void del_override(ea_t ea, int op_idx);
   void switch_override(ea_t ea, int op_idx);
   const override_t* get_override_by_index(size_t n) const;
@@ -232,8 +382,23 @@ public:
   const override_t* find_override(ea_t ea, int op_idx);
   void update_overrides_list(ea_t ea = BADADDR);
   size_t add_override(ea_t ea, int op_idx, ea_t new_ea, ea_t old_ea);
-  void load_overrides();
 
+  // overlays
+  size_t overlays_count() {
+    return overlays.size();
+  }
+
+  void free_overlays();
+  void save_overlays();
+  void load_overlays();
+  void del_overlay(ea_t ea);
+  const ea_t get_overlay_real_addr_by_index(size_t n) const;
+  const ea_t get_overlay_over_addr_by_index(size_t n) const;
+  const qstring* get_overlay_path_by_index(size_t n) const;
+  const size_t get_overlay_index_by_real_addr(ea_t real_addr) const;
+  void update_overlay(size_t n, qstring* name, ea_t old_real_addr, ea_t new_real_addr, bool moved);
+  void update_overlays_list(ea_t start_ea = BADADDR, ea_t end_ea = BADADDR);
+  size_t add_overlay(const qstring* name, ea_t overlayed_addr, ea_t real_addr);
 
   ssize_t idaapi handle_post_event(ssize_t code, int notification_code, va_list va) override {
     switch (notification_code) {
@@ -266,13 +431,375 @@ public:
 
     return code;
   }
-
 };
 
-void plugin_ctx_t::save_overrides() {
-  n.create(refs_override_node);
+ssize_t idaapi idb_post_event_visitor_t::handle_post_event(ssize_t code, int notification_code, va_list va) {
+  switch (notification_code) {
+  case idb_event::segm_deleted: {
+    if (!ida_move_del_ren) {
+      break;
+    }
 
-  n.altset(RSAT_Count, (nodeidx_t)overrides.size());
+    ea_t start_ea = va_arg(va, ea_t);
+    ea_t end_ea = va_arg(va, ea_t);
+
+    ctx.del_overlay(start_ea);
+  } break;
+  case idb_event::segm_start_changed: {
+    segment_t* s = va_arg(va, segment_t*);
+    ea_t oldstart = va_arg(va, ea_t);
+
+    size_t n = ctx.get_overlay_index_by_real_addr(oldstart);
+
+    if (n == -1) {
+      break;
+    }
+
+    qstring name;
+    get_visible_segm_name(&name, s);
+
+    ctx.update_overlay(n, &name, oldstart, s->start_ea, true);
+  } break;
+  case idb_event::segm_name_changed: {
+    if (!ida_move_del_ren) {
+      break;
+    }
+
+    refresh_chooser(overlays_wnd_title);
+  } break;
+  case idb_event::changing_segm_end: {
+    refresh_chooser(overlays_wnd_title);
+  } break;
+  case idb_event::segm_moved: {
+    if (!ida_move_del_ren) {
+      break;
+    }
+
+    ea_t from = va_arg(va, ea_t);
+    ea_t to = va_arg(va, ea_t);
+    asize_t size = va_arg(va, asize_t);
+
+    auto* segm = getseg(to);
+
+    if (segm == nullptr) {
+      break;
+    }
+
+    size_t n = ctx.get_overlay_index_by_real_addr(from);
+
+    if (n == -1) {
+      break;
+    }
+
+    qstring name;
+    get_visible_segm_name(&name, segm);
+
+    ctx.update_overlay(n, &name, from, to, true);
+  } break;
+  }
+
+  return code;
+}
+
+chooser_t::cbret_t overrides_list_t::ask_for_override(size_t n, bool enabled, ea_t addr, int op_idx, ea_t new_addr) {
+  ushort _enabled = enabled;
+  ea_t _addr = addr;
+  sval_t _op_idx = op_idx;
+  ea_t _new_addr = new_addr;
+
+  int res;
+
+  if (n != -1) {
+    res = ask_form(EDIT_FORM, &_enabled, &_addr, &_op_idx, &_new_addr);
+  }
+  else {
+    res = ask_form(ADD_FORM, &_addr, &_op_idx, &_new_addr);
+  }
+
+  switch (res) {
+  case 1: {
+    if (n != -1) {
+      ctx.update_override_value(n, _enabled, _addr, (int)_op_idx, _new_addr);
+      return cbret_t(n, SELECTION_CHANGED);
+    }
+    else {
+      ea_t old_addr = get_insn_old_addr(_addr, _op_idx);
+      n = ctx.add_override(_addr, _op_idx, _new_addr, old_addr);
+      return cbret_t(n, ALL_CHANGED);
+    }
+  } break;
+  default:
+    return cbret_t();
+  }
+}
+
+chooser_t::cbret_t idaapi overrides_list_t::del(size_t n) newapi {
+  const auto* over = ctx.get_override_by_index(n);
+  ctx.del_override(over->addr, over->op_idx);
+
+  return cbret_t(n, SELECTION_CHANGED);
+}
+
+
+inline chooser_t::cbret_t idaapi overrides_list_t::enter(size_t n) newapi {
+  const auto* over = ctx.get_override_by_index(n);
+
+  jumpto(over->addr, over->op_idx);
+  return cbret_t();
+}
+
+
+void idaapi overrides_list_t::closed() {
+  ctx.save_overrides();
+}
+
+
+size_t idaapi overrides_list_t::get_count() const {
+  return ctx.overrides_count();
+}
+
+
+ea_t idaapi overrides_list_t::get_ea(size_t n) const {
+  const auto* over = ctx.get_override_by_index(n);
+  return over->addr;
+}
+
+
+void idaapi overrides_list_t::get_row(qstrvec_t* cols_, int* icon_, chooser_item_attrs_t* attrs, size_t n) const {
+  const auto* over = ctx.get_override_by_index(n);
+
+  qstrvec_t& cols = *cols_;
+
+  cols[(int)OverridesListColumns::OLC_Enabled].sprnt("%s", over->enabled ? "X" : "");
+  cols[(int)OverridesListColumns::OLC_EA].sprnt("0x%a", over->addr);
+  cols[(int)OverridesListColumns::OLC_OpIndex].sprnt("%d", over->op_idx);
+
+  qstring name;
+  name = get_name(over->new_addr, GN_SHORT);
+  cols[(int)OverridesListColumns::OLC_NewAddr].sprnt("0x%a (%s)", over->new_addr, name.c_str());
+
+  name = get_name(over->old_addr, GN_SHORT);
+  cols[(int)OverridesListColumns::OLC_OldAddr].sprnt("0x%a (%s)", over->old_addr, name.c_str());
+}
+
+
+bool idaapi overrides_list_t::init() {
+  ctx.load_overrides();
+  return ctx.overrides_count() > 0;
+}
+
+
+chooser_t::cbret_t idaapi overrides_list_t::edit(size_t n) newapi {
+  const auto* over = ctx.get_override_by_index(n);
+  return ask_for_override(n, over->enabled, over->addr, over->op_idx, over->new_addr);
+}
+
+
+chooser_t::cbret_t idaapi overrides_list_t::refresh(ssize_t n) newapi {
+  ctx.load_overrides();
+  return cbret_t(n == -1 ? NO_SELECTION : n, n == -1 ? chooser_base_t::SELECTION_CHANGED : chooser_base_t::ALL_CHANGED);
+}
+
+
+chooser_t::cbret_t idaapi overrides_list_t::ins(ssize_t n) newapi {
+  const auto* over = ctx.get_override_by_index(n);
+  return ask_for_override();
+}
+
+chooser_t::cbret_t overlays_list_t::ask_for_overlay(size_t n /*= -1*/, const qstring* name /*= "nullptr"*/, ea_t overlayed_addr /*= BADADDR*/, ea_t real_addr /*= BADADDR*/) {
+  qstring new_segm_name;
+  size_t overs_count = ctx.overlays_count();
+  new_segm_name.sprnt("OVER%d", overs_count + 1);
+
+  qstring _segm_name = (name != nullptr) ? *name : new_segm_name;
+  ea_t _over_addr = overlayed_addr;
+  ea_t _real_addr = real_addr;
+  int res;
+
+  if (n == -1) {
+    if (last_over_addr == BADADDR) {
+      if (overs_count == 0) {
+        const auto* segm = (overs_count == 0) ? get_segm_by_name("RAM") : nullptr;
+
+        if (segm != nullptr) {
+          _real_addr = _over_addr = segm->start_ea;
+        }
+      } else {
+        _real_addr = _over_addr = ctx.get_overlay_over_addr_by_index(0);
+      }
+    } else {
+      _real_addr = _over_addr = last_over_addr;
+    }
+
+#ifndef __EA64__
+    _real_addr += (ea_t)((0x10000000) * (overs_count + 1));
+#else
+    _real_addr += (ea_t)((0x10000000 * (overs_count + 1)) << 32);
+#endif // __EA64__
+
+    res = ask_form(ADD_FORM, &_segm_name, &_over_addr, &_real_addr);
+
+    if (!check_overlay_params(&_segm_name, _over_addr, _real_addr)) {
+      return cbret_t();
+    }
+
+    last_over_addr = _over_addr;
+  }
+  else {
+    res = ask_form(EDIT_FORM, &_segm_name, &_real_addr);
+  }
+
+  switch (res) {
+  case 1: {
+    if (n != -1) {
+      ctx.update_overlay(n, &_segm_name, real_addr, _real_addr, false);
+      return cbret_t(n, SELECTION_CHANGED);
+    }
+    else {
+      n = ctx.add_overlay(&_segm_name, _over_addr, _real_addr);
+      return cbret_t(n, ALL_CHANGED);
+    }
+  } break;
+  default: {
+    return cbret_t();
+  }
+  }
+}
+
+bool overlays_list_t::check_overlay_params(const qstring* name, ea_t overlayed_addr, ea_t real_addr) {
+  if (name != nullptr) {
+    const auto* s = get_segm_by_name(name->c_str());
+
+    if (s != nullptr) {
+      warning("Segment %s already exists!\n", name->c_str());
+      return false;
+    }
+  }
+
+  if (real_addr != BADADDR) {
+    const auto* s = getseg(real_addr);
+
+    if (s != nullptr) {
+      warning("Segment with addr 0x%a already exists!\n", real_addr);
+      return false;
+    }
+
+    if (overlayed_addr != BADADDR && overlayed_addr == real_addr) {
+      warning("Overlayed and real addresses must not overlap!\n");
+      return false;
+    }
+  }
+
+  return true;
+}
+
+chooser_t::cbret_t idaapi overlays_list_t::del(size_t n) newapi {
+  const auto real_addr = ctx.get_overlay_real_addr_by_index(n);
+
+  const auto* segm = getseg(real_addr);
+
+  if (segm == nullptr) {
+    return cbret_t();
+  }
+
+  ida_move_del_ren = false;
+  if (!del_segm(real_addr, SEGMOD_KILL)) {
+    return cbret_t();
+  }
+  ida_move_del_ren = true;
+
+  ctx.del_overlay(real_addr);
+
+  return cbret_t(n, chooser_base_t::SELECTION_CHANGED);
+}
+
+chooser_t::cbret_t idaapi overlays_list_t::enter(size_t n) newapi {
+  const auto real_addr = ctx.get_overlay_real_addr_by_index(n);
+
+  jumpto(real_addr);
+  return cbret_t();
+}
+
+void idaapi overlays_list_t::closed() {
+  ctx.save_overlays();
+}
+
+size_t idaapi overlays_list_t::get_count() const {
+  return ctx.overlays_count();
+}
+
+ea_t idaapi overlays_list_t::get_ea(size_t n) const {
+  return ctx.get_overlay_real_addr_by_index(n);
+}
+
+void idaapi overlays_list_t::get_row(qstrvec_t* cols_, int* icon_, chooser_item_attrs_t* attrs, size_t n) const {
+  const auto real_addr = ctx.get_overlay_real_addr_by_index(n);
+  const auto over_addr = ctx.get_overlay_over_addr_by_index(n);
+  const auto* path = ctx.get_overlay_path_by_index(n);
+
+  const auto* segm = getseg(real_addr);
+
+  if (segm == nullptr) {
+    return;
+  }
+
+  qstrvec_t& cols = *cols_;
+
+  qstring sname;
+  get_visible_segm_name(&sname, segm);
+  cols[(int)OverlaysListColumns::OLC_Name].sprnt("%s", sname.c_str());
+  cols[(int)OverlaysListColumns::OLC_OverlayAddr].sprnt("0x%a", over_addr);
+  cols[(int)OverlaysListColumns::OLC_RealAddr].sprnt("0x%a", real_addr);
+  cols[(int)OverlaysListColumns::OLC_Size].sprnt("%lu", segm->size());
+  cols[(int)OverlaysListColumns::OLC_Path].sprnt("%s", path != nullptr ? path->c_str() : "");
+}
+
+bool idaapi overlays_list_t::init() {
+  ctx.load_overlays();
+  return ctx.overlays_count() > 0;
+}
+
+chooser_t::cbret_t idaapi overlays_list_t::edit(size_t n) newapi {
+  const auto real_addr = ctx.get_overlay_real_addr_by_index(n);
+  const auto over_addr = ctx.get_overlay_over_addr_by_index(n);
+
+  const auto* segm = getseg(real_addr);
+
+  if (segm == nullptr) {
+    warning("Cannot edit non existing segment at 0x%a\n", real_addr);
+    return cbret_t();
+  }
+
+  qstring segm_name;
+  get_visible_segm_name(&segm_name, segm);
+
+  return ask_for_overlay(n, &segm_name, over_addr, real_addr);
+}
+
+chooser_t::cbret_t idaapi overlays_list_t::refresh(ssize_t n) newapi {
+  ctx.load_overlays();
+  return cbret_t(n == -1 ? NO_SELECTION : n, n == -1 ? chooser_base_t::ALL_CHANGED : chooser_base_t::SELECTION_CHANGED);
+}
+
+chooser_t::cbret_t idaapi overlays_list_t::ins(ssize_t n) newapi {
+  const auto real_addr = ctx.get_overlay_real_addr_by_index(n);
+  const auto over_addr = ctx.get_overlay_over_addr_by_index(n);
+
+  return ask_for_overlay();
+}
+
+void plugin_ctx_t::free_overrides() {
+  for (auto i = overrides.cbegin(); i != overrides.cend(); ++i) {
+    delete i->second.first;
+  }
+
+  overrides.clear();
+}
+
+void plugin_ctx_t::save_overrides() {
+  n_overrides.create(overrides_node);
+
+  n_overrides.altset((int)OverridesStorageAltType::OSAT_Count, (nodeidx_t)overrides.size());
 
   nodeidx_t idx = 0;
   for (auto i = overrides.cbegin(); i != overrides.cend(); ++i) {
@@ -281,12 +808,34 @@ void plugin_ctx_t::save_overrides() {
 
     const auto* over = i->second.first;
 
-    n.altset(idx + RSAT_Enabled, over->enabled);
-    n.altset(idx + RSAT_EA, ea);
-    n.altset(idx + RSAT_OpIndex, ea_idx);
-    n.altset(idx + RSAT_NewAddr, over->new_addr);
-    n.altset(idx + RSAT_OldAddr, over->old_addr);
-    idx += RSAT_Last - 1;
+    n_overrides.altset(idx + (int)OverridesStorageAltType::OSAT_Enabled, over->enabled);
+    n_overrides.altset(idx + (int)OverridesStorageAltType::OSAT_EA, ea);
+    n_overrides.altset(idx + (int)OverridesStorageAltType::OSAT_OpIndex, ea_idx);
+    n_overrides.altset(idx + (int)OverridesStorageAltType::OSAT_NewAddr, over->new_addr);
+    n_overrides.altset(idx + (int)OverridesStorageAltType::OSAT_OldAddr, over->old_addr);
+    idx += (int)OverridesStorageAltType::OSAT_Last - 1;
+  }
+}
+
+void plugin_ctx_t::load_overrides() {
+  free_overrides();
+
+  n_overrides.create(overrides_node);
+
+  int overridesCount = (int)n_overrides.altval((int)OverridesStorageAltType::OSAT_Count);
+
+  nodeidx_t idx = 0;
+  for (auto i = 0; i < overridesCount; ++i) {
+    override_t* over = new override_t();
+
+    over->enabled = n_overrides.altval(idx + (int)OverridesStorageAltType::OSAT_Enabled);
+    over->addr = (ea_t)n_overrides.altval(idx + (int)OverridesStorageAltType::OSAT_EA);
+    over->op_idx = (int)n_overrides.altval(idx + (int)OverridesStorageAltType::OSAT_OpIndex);
+    over->new_addr = (ea_t)n_overrides.altval(idx + (int)OverridesStorageAltType::OSAT_NewAddr);
+    over->old_addr = (ea_t)n_overrides.altval(idx + (int)OverridesStorageAltType::OSAT_OldAddr);
+    idx += (int)OverridesStorageAltType::OSAT_Last - 1;
+
+    overrides[std::pair<ea_t, int>(over->addr, over->op_idx)] = std::pair<override_t*, size_t>(over, overrides.size());
   }
 }
 
@@ -296,7 +845,7 @@ void plugin_ctx_t::del_override(ea_t ea, int op_idx) {
     const auto ea_idx = i->first.second;
 
     if (over_ea == ea && ea_idx == op_idx) {
-      i = overrides.erase(i);
+      overrides.erase(i);
       break;
     }
     else {
@@ -376,7 +925,7 @@ void plugin_ctx_t::update_overrides_list(ea_t ea) {
   }
 
   load_overrides();
-  refresh_chooser(refs_override_widget_name);
+  refresh_chooser(overrides_wnd_title);
 }
 
 size_t plugin_ctx_t::add_override(ea_t ea, int op_idx, ea_t new_ea, ea_t old_ea) {
@@ -390,147 +939,216 @@ size_t plugin_ctx_t::add_override(ea_t ea, int op_idx, ea_t new_ea, ea_t old_ea)
   return n;
 }
 
-void plugin_ctx_t::load_overrides() {
-  overrides.clear();
+void plugin_ctx_t::free_overlays() {
+  for (auto i = overlays.cbegin(); i != overlays.cend(); ++i) {
+    delete i->second.first->path;
+    delete i->second.first;
+  }
 
-  n.create(refs_override_node);
+  overlays.clear();
+}
 
-  int overridesCount = (int)n.altval(RSAT_Count);
+void plugin_ctx_t::save_overlays() {
+  n_overlays.create(overlays_node);
+
+  n_overlays.altset((int)OverlaysStorageAltType::OSAT_Count, (nodeidx_t)overlays.size());
 
   nodeidx_t idx = 0;
-  for (auto i = 0; i < overridesCount; ++i) {
-    override_t* over = new override_t();
+  for (auto i = overlays.cbegin(); i != overlays.cend(); ++i) {
+    const auto real_addr = i->first;
+    const auto* overlay = i->second.first;
 
-    over->enabled = n.altval(idx + RSAT_Enabled);
-    over->addr = n.altval(idx + RSAT_EA);
-    over->op_idx = n.altval(idx + RSAT_OpIndex);
-    over->new_addr = n.altval(idx + RSAT_NewAddr);
-    over->old_addr = n.altval(idx + RSAT_OldAddr);
-    idx += RSAT_Last - 1;
-
-    overrides[std::pair<ea_t, int>(over->addr, over->op_idx)] = std::pair<override_t*, int>(over, overrides.size());
+    n_overlays.altset(idx + (int)OverlaysStorageAltType::OSAT_OverlayAddr, overlay->over_addr);
+    n_overlays.altset(idx + (int)OverlaysStorageAltType::OSAT_RealAddr, real_addr);
+    n_overlays.supset(idx + (int)OverlaysStorageAltType::OSAT_Path, overlay->path->c_str());
+    idx += (int)OverlaysStorageAltType::OSAT_Last - 1;
   }
 }
 
-const int overrides_list_t::list_widths[] = {
-  CHCOL_PLAIN | sizeof(list_columns[OLC_Enabled].name),
-  CHCOL_EA | 8,
-  CHCOL_DEC | sizeof(list_columns[OLC_OpIndex].name),
-  CHCOL_EA | 50,
-  CHCOL_EA | 50,
-};
+void plugin_ctx_t::load_overlays() {
+  free_overlays();
 
-const char* const overrides_list_t::list_headers[] = {
-  list_columns[OLC_Enabled].name,
-  list_columns[OLC_EA].name,
-  list_columns[OLC_OpIndex].name,
-  list_columns[OLC_NewAddr].name,
-  list_columns[OLC_OldAddr].name,
-};
+  n_overlays.create(overlays_node);
 
-chooser_t::cbret_t overrides_list_t::ask_for_override(size_t n, bool enabled, ea_t addr, int op_idx, ea_t new_addr) {
-  ushort _enabled = enabled;
-  ea_t _addr = addr;
-  sval_t _op_idx = op_idx;
-  ea_t _new_addr = new_addr;
+  int overlaysCount = (int)n_overlays.altval((int)OverlaysStorageAltType::OSAT_Count);
 
-  int res;
+  nodeidx_t idx = 0;
+  for (auto i = 0; i < overlaysCount; ++i) {
+    ea_t overlayed_addr = (ea_t)n_overlays.altval(idx + (int)OverlaysStorageAltType::OSAT_OverlayAddr);
+    ea_t real_addr = (ea_t)n_overlays.altval(idx + (int)OverlaysStorageAltType::OSAT_RealAddr);
 
-  if (n != (size_t)-1) {
-    res = ask_form(EDIT_FORM_EDIT, &_enabled, &_addr, &_op_idx, &_new_addr);
+    qstring* path = new qstring();
+    n_overlays.supstr(path, idx + (int)OverlaysStorageAltType::OSAT_Path);
+
+    overlay_t* overlay = new overlay_t({ overlayed_addr, path });
+
+    idx += (int)OverlaysStorageAltType::OSAT_Last - 1;
+
+    overlays[real_addr] = std::pair<overlay_t*, size_t>(overlay, overlays.size());
   }
-  else {
-    res = ask_form(EDIT_FORM_ADD, &_addr, &_op_idx, &_new_addr);
-  }
+}
 
-  switch (res) {
-  case 1: {
-    if (n != (size_t)-1) {
-      ctx.update_override_value(n, _enabled, _addr, (int)_op_idx, _new_addr);
+void plugin_ctx_t::del_overlay(ea_t ea) {
+  overlays.erase(ea);
+
+  update_overlays_list();
+}
+
+const ea_t plugin_ctx_t::get_overlay_real_addr_by_index(size_t n) const {
+  for (auto i = overlays.cbegin(); i != overlays.cend(); ++i) {
+    const auto real_addr = i->first;
+    const auto index = i->second.second;
+
+    if (index == n) {
+      return real_addr;
     }
-    else {
-      ea_t old_addr = get_insn_old_addr(_addr, _op_idx);
-      n = ctx.add_override(_addr, _op_idx, _new_addr, old_addr);
-    }
+  }
 
-    return cbret_t(n, SELECTION_CHANGED);
-  } break;
-  default:
-    return cbret_t();
+  return BADADDR;
+}
+
+const ea_t plugin_ctx_t::get_overlay_over_addr_by_index(size_t n) const {
+  for (auto i = overlays.cbegin(); i != overlays.cend(); ++i) {
+    const auto* overlay = i->second.first;
+    const auto index = i->second.second;
+
+    if (index == n) {
+      return (overlay != nullptr) ? overlay->over_addr : BADADDR;
+    }
+  }
+
+  return BADADDR;
+}
+
+const qstring* plugin_ctx_t::get_overlay_path_by_index(size_t n) const {
+  for (auto i = overlays.cbegin(); i != overlays.cend(); ++i) {
+    const auto* overlay = i->second.first;
+    const auto index = i->second.second;
+
+    if (index == n) {
+      return (overlay != nullptr) ? overlay->path : nullptr;
+    }
+  }
+
+  return nullptr;
+}
+
+const size_t plugin_ctx_t::get_overlay_index_by_real_addr(ea_t real_addr) const {
+  for (auto i = overlays.cbegin(); i != overlays.cend(); ++i) {
+    const auto i_addr = i->first;
+    const auto index = i->second.second;
+
+    if (i_addr == real_addr) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+void plugin_ctx_t::update_overlay(size_t n, qstring* name, ea_t old_real_addr, ea_t new_real_addr, bool moved) {
+  for (auto i = overlays.begin(); i != overlays.end(); ) {
+    auto* overlay = i->second.first;
+    const auto index = i->second.second;
+
+    if (index == n) {
+      auto* segm = getseg(moved ? new_real_addr : old_real_addr);
+
+      if (segm == nullptr) {
+        return;
+      }
+
+      ida_move_del_ren = false;
+      int res = move_segm(segm, new_real_addr, MSF_NOFIX);
+      ida_move_del_ren = true;
+
+      switch (res) {
+      case MOVE_SEGM_OK: {
+        ida_move_del_ren = false;
+        int res2 = set_segm_name(segm, name->c_str());
+        ida_move_del_ren = true;
+
+        switch (res2) {
+        case 1: {
+          overlays[new_real_addr] = std::pair<overlay_t*, size_t>(overlay, n);
+
+          if (old_real_addr != new_real_addr) {
+            overlays.erase(i);
+          }
+        } break;
+        }
+
+        update_overlays_list();
+        return;
+      } break;
+      }
+
+      qstring segm_name;
+      get_visible_segm_name(&segm_name, segm);
+
+      warning("Cannot update %s segment!\n", segm_name.c_str());
+      return;
+    } else {
+      ++i;
+    }
   }
 }
 
-chooser_t::cbret_t idaapi overrides_list_t::del(size_t n) newapi {
-  const auto* over = ctx.get_override_by_index(n);
-  ctx.del_override(over->addr, over->op_idx);
+void plugin_ctx_t::update_overlays_list(ea_t start_ea /*= BADADDR*/, ea_t end_ea /*= BADADDR*/) {
+  save_overlays();
 
-  return cbret_t(n, SELECTION_CHANGED);
+  if (start_ea != BADADDR && end_ea != BADADDR) {
+    plan_range(start_ea, end_ea);
+  }
+
+  load_overlays();
+  refresh_chooser(overlays_wnd_title);
 }
 
+size_t plugin_ctx_t::add_overlay(const qstring* name, ea_t overlayed_addr, ea_t real_addr) {
+  if (!overlays_list_t::check_overlay_params(name, overlayed_addr, real_addr)) {
+    return -1;
+  }
 
-inline chooser_t::cbret_t idaapi overrides_list_t::enter(size_t n) newapi {
-  const auto* over = ctx.get_override_by_index(n);
+  char* over_path = ask_file(false, "*.bin", "Select overlay binary...");
 
-  jumpto(over->addr, over->op_idx);
-  return cbret_t(n, SELECTION_CHANGED);
-}
+  if (over_path == nullptr) {
+    return -1;
+  }
 
+  linput_t* li = open_linput(over_path, false);
 
-void idaapi overrides_list_t::closed() {
-  ctx.save_overrides();
-}
+  if (li == nullptr) {
+    warning("Cannot load overlay binary!\n");
+    return -1;
+  }
 
+  if (!load_binary_file(over_path, li, NEF_CODE | NEF_SEGS, 0, 0, real_addr, 0)) {
+    warning("Cannot load overlay binary!\n");
+    return -1;
+  }
 
-size_t idaapi overrides_list_t::get_count() const {
-  return ctx.count();
-}
+  close_linput(li);
 
+  auto* segm = getseg(real_addr);
 
-ea_t idaapi overrides_list_t::get_ea(size_t n) const {
-  const auto* over = ctx.get_override_by_index(n);
-  return over->addr;
-}
+  if (segm == nullptr) {
+    warning("Cannot find segment at 0x%a address\n", real_addr);
+    return -1;
+  }
 
+  set_segm_name(segm, name->c_str());
 
-void idaapi overrides_list_t::get_row(qstrvec_t* cols_, int* icon_, chooser_item_attrs_t* attrs, size_t n) const {
-  const auto* over = ctx.get_override_by_index(n);
+  size_t n = overlays.size();
 
-  qstrvec_t& cols = *cols_;
+  qstring* path = new qstring();
+  path->sprnt("%s", over_path);
+  overlay_t* overlay = new overlay_t({ overlayed_addr, path });
+  overlays[real_addr] = std::pair<overlay_t*, size_t>(overlay, n);
 
-  cols[OLC_Enabled].sprnt("%s", over->enabled ? "X" : "");
-  cols[OLC_EA].sprnt("0x%a", over->addr);
-  cols[OLC_OpIndex].sprnt("%d", over->op_idx);
+  update_overlays_list(real_addr, segm->end_ea);
 
-  qstring name;
-  name = get_name(over->new_addr, GN_SHORT);
-  cols[OLC_NewAddr].sprnt("0x%a (%s)", over->new_addr, name.c_str());
-
-  name = get_name(over->old_addr, GN_SHORT);
-  cols[OLC_OldAddr].sprnt("0x%a (%s)", over->old_addr, name.c_str());
-}
-
-
-bool idaapi overrides_list_t::init() {
-  ctx.load_overrides();
-  return ctx.count() > 0;
-}
-
-
-chooser_t::cbret_t idaapi overrides_list_t::edit(size_t n) newapi {
-  const auto* over = ctx.get_override_by_index(n);
-  return ask_for_override(n, over->enabled, over->addr, over->op_idx, over->new_addr);
-}
-
-
-chooser_t::cbret_t idaapi overrides_list_t::refresh(ssize_t n) newapi {
-  ctx.load_overrides();
-  return cbret_t(n == -1 ? NO_SELECTION : n, ALL_CHANGED);
-}
-
-
-chooser_t::cbret_t idaapi overrides_list_t::ins(ssize_t n) newapi {
-  const auto* over = ctx.get_override_by_index(n);
-  return ask_for_override(-1, over->enabled, over->addr, over->op_idx, over->new_addr);
+  return n;
 }
 
 static plugmod_t * idaapi init(void) {
@@ -567,5 +1185,5 @@ plugin_t PLUGIN =
 
     "References Overrider", // the preferred short name of the plugin
 
-    refs_override_action_hotkey // the preferred hotkey to run the plugin
+    overrides_change_dest_hotkey // the preferred hotkey to run the plugin
 };
