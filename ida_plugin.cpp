@@ -104,15 +104,19 @@ struct overlay_t {
 };
 
 static void set_operand_ref(op_t& op, ea_t new_addr) {
-  if (op.type == o_void) {
-    return;
-  }
-
-  if (op.type == o_near || op.type == o_far || op.type == o_mem) {
+  switch (op.type) {
+  case o_void:
+    break;
+  case o_near:
+  o_far:
+  o_mem:
     op.addr = new_addr;
-  }
-  else {
+    break;
+  case o_imm:
     op.value = new_addr;
+    break;
+  default:
+    warning("Type %d is not supported for now. Please, create an issue!\n");
   }
 }
 
@@ -277,16 +281,20 @@ struct overrides_menu_action_t : public action_handler_t {
   }
 };
 
-struct idb_post_event_visitor_t : public post_event_visitor_t {
+struct idb_post_event_visitor_t : public event_listener_t {
   plugin_ctx_t& ctx;
 
 public:
   idb_post_event_visitor_t(plugin_ctx_t& ctx_) : ctx(ctx_) {};
 
-  ssize_t idaapi handle_post_event(ssize_t code, int notification_code, va_list va) override;
+  ssize_t idaapi on_event(ssize_t code, va_list va) override;
 };
 
-struct plugin_ctx_t : public plugmod_t, post_event_visitor_t {
+
+static std::map<std::pair<ea_t, size_t>, std::pair<override_t*, size_t>> overrides; // instr addr/operand, struct/index
+static netnode n_overrides;
+
+struct plugin_ctx_t : public plugmod_t/*, event_listener_t*/ {
 
   overrides_list_t overrides_list = overrides_list_t(overrides_wnd_title, *this);
   overrides_menu_action_t overrides_menu = overrides_menu_action_t(&overrides_list);
@@ -297,9 +305,8 @@ struct plugin_ctx_t : public plugmod_t, post_event_visitor_t {
   idb_post_event_visitor_t idb_visitor = idb_post_event_visitor_t(*this);
 
 private:
-  std::map<std::pair<ea_t, size_t>, std::pair<override_t*, size_t>> overrides; // instr addr/operand, struct/index
   std::map<ea_t, std::pair<overlay_t*, size_t>> overlays; // real addr, overlayed addr/index
-  netnode n_overrides, n_overlays;
+  netnode n_overlays;
 
 public:
   plugin_ctx_t() {
@@ -328,8 +335,9 @@ public:
     ));
     attach_action_to_menu(overlays_menu_action_path, overlays_show_wnd_name, SETMENU_APP);
 
-    register_post_event_visitor(HT_IDP, this, this);
-    register_post_event_visitor(HT_IDB, &idb_visitor, this);
+    hook_to_notification_point(HT_IDP, plugin_ctx_t::on_event);
+    //hook_event_listener(HT_IDP, this);
+    hook_event_listener(HT_IDB, &idb_visitor);
 
     plugin_inited = true;
   }
@@ -347,9 +355,9 @@ public:
       if (ask_addr(&new_addr, "Destination address")) {
         if (is_mapped(new_addr)) {
           add_override(ea, op_idx, new_addr, old_addr);
-          plan_ea(ea);
         } else {
           warning("Incorrect address (is not mapped)!");
+          return false;
         }
       }
 
@@ -367,6 +375,8 @@ public:
       recursive = false;
       ida_move_del_ren = false;
       last_over_addr = BADADDR;
+
+      unhook_from_notification_point(HT_IDP, plugin_ctx_t::on_event);
     }
 
     plugin_inited = false;
@@ -376,14 +386,14 @@ public:
     return overrides.size();
   }
 
-  void free_overrides();
+  static void free_overrides();
   void save_overrides();
-  void load_overrides();
+  static void load_overrides();
   void del_override(ea_t ea, int op_idx);
   void switch_override(ea_t ea, int op_idx);
   const override_t* get_override_by_index(size_t n) const;
   void update_override_value(size_t n, bool enabled, ea_t addr, int op_idx, ea_t new_addr);
-  const override_t* find_override(ea_t ea, int op_idx);
+  static const override_t* find_override(ea_t ea, int op_idx);
   void update_overrides_list(ea_t ea = BADADDR);
   size_t add_override(ea_t ea, int op_idx, ea_t new_ea, ea_t old_ea);
 
@@ -404,7 +414,7 @@ public:
   void update_overlays_list(ea_t start_ea = BADADDR, ea_t end_ea = BADADDR);
   size_t add_overlay(const qstring* name, ea_t overlayed_addr, ea_t real_addr);
 
-  ssize_t idaapi handle_post_event(ssize_t code, int notification_code, va_list va) override {
+  static ssize_t idaapi on_event(void* data, int notification_code, va_list va) /*override*/ {
     switch (notification_code) {
     case processor_t::ev_ana_insn: {
       insn_t* insn = va_arg(va, insn_t*);
@@ -414,7 +424,12 @@ public:
       }
 
       recursive = true;
-      decode_insn(insn, insn->ea);
+
+      if (ph.ana_insn(insn) <= 0) {
+        recursive = false;
+        break;
+      }
+
       recursive = false;
 
       load_overrides();
@@ -433,12 +448,12 @@ public:
     } break;
     }
 
-    return code;
+    return 0;
   }
 };
 
-ssize_t idaapi idb_post_event_visitor_t::handle_post_event(ssize_t code, int notification_code, va_list va) {
-  switch (notification_code) {
+ssize_t idaapi idb_post_event_visitor_t::on_event(ssize_t code, va_list va) {
+  switch (code) {
   case idb_event::segm_deleted: {
     if (!ida_move_del_ren) {
       break;
@@ -502,7 +517,7 @@ ssize_t idaapi idb_post_event_visitor_t::handle_post_event(ssize_t code, int not
   } break;
   }
 
-  return code;
+  return 0;
 }
 
 chooser_t::cbret_t overrides_list_t::ask_for_override(size_t n, bool enabled, ea_t addr, int op_idx, ea_t new_addr) {
@@ -1159,9 +1174,9 @@ static plugmod_t * idaapi init(void) {
   return new plugin_ctx_t;
 }
 
-char comment[] = "Refs Overrider plugin by Vladimir Kononovich";
+char comment[] = "References Overrider plugin by Vladimir Kononovich";
 
-char help[] = "Refs Overrider by Vladimir Kononovich.\n"
+char help[] = "References Overrider by Vladimir Kononovich.\n"
 "\n"
 "This module allows to override refs in IDA\n";
 
