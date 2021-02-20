@@ -104,6 +104,10 @@ struct overlay_t {
 };
 
 static void set_operand_ref(op_t& op, ea_t new_addr) {
+  if (op.type == o_void) {
+    return;
+  }
+
   if (op.type == o_near || op.type == o_far || op.type == o_mem) {
     op.addr = new_addr;
   }
@@ -293,7 +297,7 @@ struct plugin_ctx_t : public plugmod_t, post_event_visitor_t {
   idb_post_event_visitor_t idb_visitor = idb_post_event_visitor_t(*this);
 
 private:
-  std::map<std::pair<ea_t, int>, std::pair<override_t*, size_t>> overrides; // instr addr/operand, struct/index
+  std::map<std::pair<ea_t, size_t>, std::pair<override_t*, size_t>> overrides; // instr addr/operand, struct/index
   std::map<ea_t, std::pair<overlay_t*, size_t>> overlays; // real addr, overlayed addr/index
   netnode n_overrides, n_overlays;
 
@@ -835,7 +839,7 @@ void plugin_ctx_t::load_overrides() {
     over->old_addr = (ea_t)n_overrides.altval(idx + (int)OverridesStorageAltType::OSAT_OldAddr);
     idx += (int)OverridesStorageAltType::OSAT_Last - 1;
 
-    overrides[std::pair<ea_t, int>(over->addr, over->op_idx)] = std::pair<override_t*, size_t>(over, overrides.size());
+    overrides[std::pair<ea_t, size_t>(over->addr, over->op_idx)] = std::pair<override_t*, size_t>(over, overrides.size());
   }
 }
 
@@ -932,7 +936,7 @@ size_t plugin_ctx_t::add_override(ea_t ea, int op_idx, ea_t new_ea, ea_t old_ea)
   override_t* over = new override_t({ true, ea, op_idx, new_ea, old_ea });
 
   size_t n = overrides.size();
-  overrides[std::pair<ea_t, int>(ea, op_idx)] = std::pair<override_t*, int>(over, n);
+  overrides[std::pair<ea_t, size_t>(ea, op_idx)] = std::pair<override_t*, size_t>(over, n);
 
   update_overrides_list(ea);
 
